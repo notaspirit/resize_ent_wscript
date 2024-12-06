@@ -15,6 +15,8 @@ import * as TypeHelper from 'TypeHelper.wscript';
 // constants ------------------------------------------------------------
 // settings
 const DEFAULT_CONFIG = {
+    "verbose": false,
+    "comment0": "verbose: True means more detailed logging.",
     "scaleFactor": 1.0,
     "comment1": "scaleFactor: The scale factor to resize the entity by.",
     "entityPath": "",
@@ -37,6 +39,8 @@ const DEFAULT_CONFIG = {
 
 const config_path = "resize_entity_config.json"
 
+let config = {};
+
 // functions ------------------------------------------------------------
 
 // general use utils
@@ -44,14 +48,15 @@ const utils = {
     // return bool or json object
     getConfig() {
         if (wkit.FileExistsInRaw(config_path)) {
-            return JSON.parse(wkit.LoadRawJsonFromProject(config_path, "json"));
+            config = JSON.parse(wkit.LoadRawJsonFromProject(config_path, "json"));
+            return true;
         } else {
             wkit.SaveToRaw(config_path, JSON.stringify(DEFAULT_CONFIG, null, 2));
             return false;
         }
     },
     // return bool
-    validateConfig(config) {
+    validateConfig() {
         let valid = true;
         // validate the config
         if (config.scaleFactor <= 0) {
@@ -82,16 +87,16 @@ const utils = {
 // process file types
 const processFiles = {
     // return bool
-    entity(config) {
+    entity() {
         // load the entity
-        Logger.Info('Processing entity: ' + config.entityPath);
-        let entity = utils.loadFileAsJson(config.entityPath);
+        Logger.Info('Processing entity: ' + config["entityPath"]);
+        let entity = utils.loadFileAsJson(config["entityPath"]);
         if (entity == false) {
             return;
         }
     
         // process the entities components and dependencies
-        const [entity_success, entity_new] = processGeneric.appearance(entity, config);
+        const [entity_success, entity_new] = processGeneric.appearance(entity);
         if (!entity_success) {
             Logger.Error("Failed to process entity components.");
             return false;
@@ -111,7 +116,7 @@ const processGeneric = {
     
     // return bool, array of resolved dependencies
     // should work, but not tested
-    repathDependencies(dependencies, config) {
+    repathDependencies(dependencies) {
         Logger.Info('Repathing dependencies...');
         try {
             const repathedDependencies = [];
@@ -138,7 +143,7 @@ const processGeneric = {
     },
     // return bool, json object (same as input only with the changed components and resolved dependencies)
     // takes either an entire entity directly or an appearance from the appearances array in the app file
-    appearance(appearance, config) {
+    appearance(appearance) {
         Logger.Info('Processing appearance...');
         try {
     
@@ -210,49 +215,90 @@ const processComponents = {
 
             return [true, transform];
         } catch (error) {
-            Logger.Error('Error processing transform: ' + error);
             return [false, transform];
         }
+    },
+    entSlotComponent(component) {
+        try {
+            for (const slot of component["slots"]) {
+                slot["relativePosition"]["X"] *= config["scaleFactor"];
+                slot["relativePosition"]["Y"] *= config["scaleFactor"];
+                slot["relativePosition"]["Z"] *= config["scaleFactor"];
+            }
+            return [true, component];
+        } catch (error) {
+            Logger.Error('Error processing entSlotComponent: ' + error);
+            return [false, component];
+        }
+    },
+    entMeshComponent(component) {
+        try {
+            component["visualScale"]["X"] *= config["scaleFactor"];
+            component["visualScale"]["Y"] *= config["scaleFactor"];
+            component["visualScale"]["Z"] *= config["scaleFactor"];
+            return [true, component];
+        } catch (error) {
+            Logger.Error('Error processing entMeshComponent: ' + error);
+            return [false, component];
+        }
+    },
+    entAnimatedComponent(component) {
+        return [true, component];
+    },
+    entEffectSpawnerComponent(component) {
+        return [true, component];
+    },
+    entLightChannelComponent(component) {
+        return [true, component];
+    },
+    cerberusComponent(component) {
+        return [true, component];
     },
     
     // return bool, array of components
     // takes an array of components and resizes them, returns true if successful
     // is the entry point for processing components
-    array(components, scaleFactor) {
+    array(components) {
         const processedComponents = [];
         try {
             for (const component of components) {
                 // try to adjust the local Transform on component level
                 try {
-                    const [success, newTransform] = processComponents.localTransform(component['localTransform'], scaleFactor);
+                    const [success, newTransform] = processComponents.localTransform(component['localTransform'], config["scaleFactor"]);
                     if (!success) {
-                        Logger.Warn('Failed to process localTransform for component: ' + component['$type']);
+                        if (config["verbose"]) {
+                            Logger.Warning('Failed to process localTransform for component: ' + component['$type']);
+                        }
+                    } else {
+                        component['localTransform'] = newTransform;
                     }
-                    component['localTransform'] = newTransform;
                 } catch (error) {
-                    Logger.Warn('No localTransform found for component: ' + component['$type']);
+                    Logger.Warning('No localTransform found for component: ' + component['$type']);
                 }
 
                 // get the action type for the component
                 const actionTypes = {
-                    "entSlotComponent": processComponents.entSlotComponent,
-                    "entMeshComponent": processComponents.entMeshComponent,
-                    "entPhysicalMeshComponent": processComponents.entMeshComponent,
-                    "entAnimatedComponent": processComponents.entAnimatedComponent,
-                    "entEffectSpawnerComponent": processComponents.entEffectSpawnerComponent,
-                    "entLightChannelComponent": processComponents.entLightChannelComponent,
+                    "entSlotComponent": () => processComponents.entSlotComponent(component),
+                    "entMeshComponent": () => processComponents.entMeshComponent(component),
+                    "entPhysicalMeshComponent": () => processComponents.entMeshComponent(component),
+                    "entAnimatedComponent": () => processComponents.entAnimatedComponent(component),
+                    "entEffectSpawnerComponent": () => processComponents.entEffectSpawnerComponent(component),
+                    "entLightChannelComponent": () => processComponents.entLightChannelComponent(component),
+                    "cerberusComponent": () => processComponents.cerberusComponent(component), // special case for cerberus, linking to an .es file
                 }
 
                 // If component type exists in actionTypes, process it, otherwise just pass it through
                 if (component['$type'] in actionTypes) {
-                    const [success, component_new] = actionTypes[component['$type']](component, scaleFactor);
+                    const [success, component_new] = actionTypes[component['$type']](component);
                     if (!success) {
                         Logger.Error("Failed to process component: " + component['$type']);
                         return [false, []];
                     }
                     processedComponents.push(component_new);
                 } else {
-                    Logger.Info("Skipping generic component type: " + component['$type']);
+                    if (config["verbose"]) {
+                        Logger.Info("Skipping generic component type: " + component['$type']);
+                    }
                     processedComponents.push(component);
                 }
             }
@@ -268,21 +314,20 @@ const processComponents = {
 function main() {
     Logger.Info('Starting resize entity script...');
     // get config or create and exit early if no config existed at the start
-    let config = utils.getConfig();
-    if (config == false) {
+    if (!utils.getConfig()) {
         Logger.Error('No config file found, created default config in raw. Please fill it with the required values and run the script again.');
         return;
     }
     Logger.Success('Config loaded successfully.');
 
-    if (!utils.validateConfig(config)) {
+    if (!utils.validateConfig()) {
         Logger.Error('Config is invalid, please fix the config and run the script again.');
         return;
     }
 
     Logger.Info('Config is valid, starting resize process...');
 
-    if (!processFiles.entity(config)) {
+    if (!processFiles.entity()) {
         Logger.Error('Error processing entity, please check the console for more information.');
         return;
     }
