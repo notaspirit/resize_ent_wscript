@@ -237,6 +237,8 @@ const processFiles = {
         if (rig == false) {
             return false;
         }
+        // Logger.Info('Scaling rig...');
+        // Logger.Info(JSON.stringify(rig, null, 2));
         try {
             for (const bone of rig['Data']['RootChunk']['boneTransforms']) {
                 // Scale the Scale values
@@ -253,6 +255,8 @@ const processFiles = {
             Logger.Error('Error processing rig (' + rigFilepath + '): ' + error);
             return false;
         }
+        // Logger.Info('Scaled rig.');
+        // Logger.Info(JSON.stringify(rig, null, 2));
         if (!utils.addFileToSaveBuffer(rigFilepath, rig)) {
             Logger.Error('Failed to save rig.');
             return false;
@@ -351,6 +355,46 @@ const processFiles = {
             return false;
         }
         Logger.Success('Appearance added to save buffer.');
+        return true;
+    },
+    /**
+     * @returns {boolean}
+     */
+    es(esFilepath) {
+        Logger.Info('Processing es: ' + esFilepath);
+        if (config["overwriteVanilla"]) {
+            Logger.Info('Overwriting vanilla, skipping es.');
+            return true;
+        }
+        if (!esFilepath.endsWith(".es")) {
+            Logger.Info('Es is not an es file, skipping.');
+            return true;
+        }
+        let es = utils.loadFileAsJson(esFilepath);
+        if (es == false) {
+            Logger.Warning('Failed to load es.');
+            return true;
+        }
+        for (let index = 0; index < es["Data"]["RootChunk"]["effects"].length; index++) {
+            try {
+                let effect = es["Data"]["RootChunk"]["effects"][index]["postActions"][0]["Data"]["effect"]["DepotPath"]["$value"];
+                processFiles.effect(effect);
+                const newEffectFilepath = utils.repathToSave(effect);
+                if (newEffectFilepath == false) {
+                    Logger.Error('Failed to repath effect: ' + effect);
+                    continue;
+                }
+                es["Data"]["RootChunk"]["effects"][index]["postActions"][0]["Data"]["effect"]["DepotPath"]["$value"] = newEffectFilepath;
+            } catch (error) {
+                Logger.Error('Error processing es: ' + error);
+                continue;
+            }
+        }
+        if (!utils.addFileToSaveBuffer(esFilepath, es)) {
+            Logger.Error('Failed to save es to buffer.');
+            return false;
+        }
+        Logger.Success('Es added to save buffer.');
         return true;
     }
 }
@@ -591,9 +635,14 @@ const processComponents = {
             Logger.Info("Got Chunk: " + Object.keys(chunk));
             for (const effect of chunk["effectDescs"]) {
                 Logger.Info("Effect: " + Object.keys(effect["Data"]));
+                if (!effect["Data"]["effect"]["DepotPath"]["$value"].endsWith(".effect")) {
+                    Logger.Info("Effect is not an effect file, skipping.");
+                    continue;
+                }
                 processFiles.effect(effect["Data"]["effect"]["DepotPath"]["$value"]);
                 const newEffectFilepath = utils.repathToSave(effect["Data"]["effect"]["DepotPath"]["$value"]);
                 if (newEffectFilepath == false) {
+                    
                     return [false, component];
                 }
                 effect["Data"]["effect"]["DepotPath"]["$value"] = newEffectFilepath;
@@ -635,13 +684,49 @@ const processComponents = {
         }
         return [true, component];
     },
+    /**
+     * @returns {boolean | json}
+     */
     cerberusComponent(component) {
-        // get the es file 
+        Logger.Info('Processing cerberusComponent...');
+        let repeatedEsFilepaths = [];
+        try {
+            // Get all properties that contain "laserGameEffect"
+            const effectProperties = Object.keys(component).filter(key => 
+                key.includes('laserGameEffect')
+            );
+    
+            // Process each effect property
+            for (const effectProp of effectProperties) {
+                if (!component[effectProp] || component[effectProp]["$type"] !== "gameEffectRef") {
+                    continue;
+                }
+                
+                const esFilepath = component[effectProp]["set"]["DepotPath"]["$value"];
+                repeatedEsFilepaths.push(esFilepath);
+                Logger.Info('Found es file: ' + esFilepath);
+            }
+    
+            // Process unique ES files
+            const sortedEsFilepaths = [...new Set(repeatedEsFilepaths)];
+            Logger.Info('Processing unique es filepaths: ' + sortedEsFilepaths);
+            
+            for (const esFilepath of sortedEsFilepaths) {
+                const success = processFiles.es(esFilepath);
+                if (!success) {
+                    Logger.Error('Failed to process es: ' + esFilepath);
+                    return [false, component];
+                }
+            }
+        } catch (error) {
+            Logger.Error('Error processing cerberusComponent: ' + error);
+            return [false, component];
+        }
         return [true, component];
     },
     
     /**
-     * @returns {boolean | array}
+     * @returns {boolean | json}
      */
     array(components, rawJson) {
         Logger.Info('Processing components...');
@@ -674,7 +759,7 @@ const processComponents = {
                     "entAnimatedComponent": () => processComponents.entAnimatedComponent(component),
                     "entEffectSpawnerComponent": () => processComponents.entEffectSpawnerComponent(component, rawJson),
                     "entLightChannelComponent": () => processComponents.entLightChannelComponent(component, rawJson),
-                    "cerberusComponent": () => processComponents.cerberusComponent(component), // special case for cerberus, linking to an .es file
+                    "CerberusComponent": () => processComponents.cerberusComponent(component), // special case for cerberus, linking to an .es file
                 }
 
                 // If component type exists in actionTypes, process it, otherwise just pass it through
