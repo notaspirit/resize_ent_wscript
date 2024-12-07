@@ -35,7 +35,7 @@ const DEFAULT_CONFIG = {
     },
     "comment5": "customPaths: The output paths for the resized resources (will be appended to the customRootPath), if overwriteVanilla is false. Escape the backslashes in the path by doubling them.",
     "ChangeLODMode": false,
-    "comment6": "ChangeLODMode: Whether to set all mesh components to AlwaysVisible. (Only needd if you scale the entity up significantly)"
+    "comment6": "ChangeLODMode: Whether to set all mesh components to AlwaysVisible. (Only needed if you scale the entity up significantly)"
 };
 
 const config_path = "resize_entity_config.json"
