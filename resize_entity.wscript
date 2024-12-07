@@ -45,7 +45,9 @@ let config = {};
 
 // general use utils
 const utils = {
-    // return bool or json object
+    /**
+     * @returns {boolean}
+     */
     getConfig() {
         if (wkit.FileExistsInRaw(config_path)) {
             config = JSON.parse(wkit.LoadRawJsonFromProject(config_path, "json"));
@@ -56,6 +58,9 @@ const utils = {
         }
     },
     // return bool
+    /**
+     * @returns {boolean}
+     */
     validateConfig() {
         let valid = true;
         // validate the config
@@ -73,7 +78,9 @@ const utils = {
         }
         return valid;
     },
-    // return bool or json object
+    /**
+     * @returns {boolean | json}
+     */
     loadFileAsJson(path) {
         try {
             return JSON.parse(wkit.GetFile(path, OpenAs.Json));
@@ -81,18 +88,64 @@ const utils = {
             Logger.Error('Error loading file as json: ' + error);
             return false;
         }
+    },
+    /**
+     * @returns {string | boolean}
+     */
+    repathToSave(path) {
+        if (config["overwriteVanilla"]) {
+            return path;
+        }
+        try {
+            const fileNameOnly = path.split("\\").pop();
+            const ext = fileNameOnly.split(".")[1];
+
+            return config["customRootPath"] + config["customPaths"][ext] + fileNameOnly;
+        } catch (error) {
+            Logger.Error('Error repathing before saving: ' + error);
+            return false;
+        }
+    },
+    /**
+     * @returns {boolean}
+     */
+    saveJsonAsGameFile(path, data) {
+        const savePath = utils.repathToSave(path);
+        if (savePath == false) {
+            return false;
+        }
+
+        let cr2wContent = null;
+        try {
+            cr2wContent = wkit.JsonToCR2W(JSON.stringify(data, null, 2));
+        } catch (err) {
+            Logger.Error(`Couldn't parse active file content to cr2w:`);
+            Logger.Error(err);
+            return false;
+        }
+    
+        try {
+            wkit.SaveToProject(savePath, cr2wContent); 
+        } catch (err) {
+            Logger.Error(`Couldn't save ${savePath}:`);
+            Logger.Error(err);
+            return false;
+        }
+        return true;
     }
 }
 
 // process file types
 const processFiles = {
-    // return bool
+    /**
+     * @returns {boolean}
+     */
     entity() {
         // load the entity
         Logger.Info('Processing entity: ' + config["entityPath"]);
         let entity = utils.loadFileAsJson(config["entityPath"]);
         if (entity == false) {
-            return;
+            return false;
         }
     
         // process the entities components and dependencies
@@ -105,8 +158,45 @@ const processFiles = {
     
         // process the linked appearance file if it exists
     
-        // save the entity, implement later
-    
+        // save the entity
+        if (!utils.saveJsonAsGameFile(config["entityPath"], entity)) {
+            Logger.Error("Failed to save entity.");
+            return false;
+        }
+        Logger.Success("Entity saved successfully.");
+        return true;
+    },
+    /**
+     * @returns {boolean}
+     */
+    rig(rigFilepath) {
+        let rig = utils.loadFileAsJson(rigFilepath);
+        if (rig == false) {
+            return false;
+        }
+        try {
+            for (const bone of rig['Data']['RootChunk']['boneTransforms']) {
+                // Scale the Scale values
+                bone['Scale']['X'] *= config["scaleFactor"];
+                bone['Scale']['Y'] *= config["scaleFactor"];
+                bone['Scale']['Z'] *= config["scaleFactor"];
+                
+                // Scale the Position values
+                bone['Translation']['X'] *= config["scaleFactor"];
+                bone['Translation']['Y'] *= config["scaleFactor"];
+                bone['Translation']['Z'] *= config["scaleFactor"];
+            }
+        } catch (error) {
+            Logger.Error('Error processing rig (' + rigFilepath + '): ' + error);
+            return false;
+        }
+        return true;
+    },
+    /**
+     * @returns {boolean}
+     */
+    anims(animFilepath) {
+        // needs implementation
         return true;
     }
 }
@@ -114,9 +204,13 @@ const processFiles = {
 // process generic -> functions that are used for multiple file types
 const processGeneric = {
     
-    // return bool, array of resolved dependencies
-    // should work, but not tested
+    /**
+     * @returns {boolean | array}
+     */
     repathDependencies(dependencies) {
+        if (config["overwriteVanilla"]) {
+            return [true, dependencies];
+        }
         Logger.Info('Repathing dependencies...');
         try {
             const repathedDependencies = [];
@@ -141,8 +235,9 @@ const processGeneric = {
             return [false, []];
         }
     },
-    // return bool, json object (same as input only with the changed components and resolved dependencies)
-    // takes either an entire entity directly or an appearance from the appearances array in the app file
+    /**
+     * @returns {boolean | json}
+     */
     appearance(appearance) {
         Logger.Info('Processing appearance...');
         try {
@@ -174,7 +269,9 @@ const processGeneric = {
 
 // process components
 const processComponents = {
-    // Process WorldPosition with FixedPoint values
+    /**
+     * @returns {boolean | json}
+     */
     position(position, scaleFactor) {
         try {
             if (position['$type'] !== 'WorldPosition') {
@@ -196,7 +293,9 @@ const processComponents = {
         }
     },
 
-    // Process the entire transform
+    /**
+     * @returns {boolean | json}
+     */
     localTransform(transform, scaleFactor) {
         try {
             if (transform['$type'] !== 'WorldTransform') {
@@ -218,6 +317,9 @@ const processComponents = {
             return [false, transform];
         }
     },
+    /**
+     * @returns {boolean | json}
+     */
     entSlotComponent(component) {
         try {
             for (const slot of component["slots"]) {
@@ -243,15 +345,45 @@ const processComponents = {
         }
     },
     entAnimatedComponent(component) {
+        // get rig file
+        try {
+            const rigFilepath = component["rig"]["DepotPath"]["$value"];
+            processFiles.rig(rigFilepath); // needs implementation
+        } catch (error) {
+            if (config["verbose"]) {
+                Logger.Warning('No rig file found for entAnimatedComponent');
+            }
+        }
+
+        // get animation files
+        try {
+            const animsArray = component["animations"]["gameplay"];
+            for (const anim of animsArray) {
+                if (anim["$type"] != "animAnimSetupEntry") {
+                    continue;
+                }
+                const animFilepath = anim["animSet"]["DepotPath"]["$value"];
+                processFiles.anims(animFilepath); // needs implementation
+            }
+        } catch (error) {
+            if (config["verbose"]) {
+                Logger.Warning('No anims file found for entAnimatedComponent');
+            }
+        }
+
         return [true, component];
     },
     entEffectSpawnerComponent(component) {
+        // get effect files
+        // rescale values
         return [true, component];
     },
     entLightChannelComponent(component) {
+        // need to go from `HandleRefId` to array of vertices
         return [true, component];
     },
     cerberusComponent(component) {
+        // get the es file 
         return [true, component];
     },
     
