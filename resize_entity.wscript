@@ -33,7 +33,9 @@ const DEFAULT_CONFIG = {
         "es": "\\fx\\es\\",
         "effect": "\\fx\\effects\\"
     },
-    "comment5": "customPaths: The output paths for the resized resources (will be appended to the customRootPath), if overwriteVanilla is false. Escape the backslashes in the path by doubling them."
+    "comment5": "customPaths: The output paths for the resized resources (will be appended to the customRootPath), if overwriteVanilla is false. Escape the backslashes in the path by doubling them.",
+    "ChangeLODMode": false,
+    "comment6": "ChangeLODMode: Whether to set all mesh components to AlwaysVisible. (Only needd if you scale the entity up significantly)"
 };
 
 const config_path = "resize_entity_config.json"
@@ -85,7 +87,12 @@ const utils = {
      */
     loadFileAsJson(path) {
         try {
-            return JSON.parse(wkit.GetFile(path, OpenAs.Json));
+            const file = wkit.GetFile(path, OpenAs.Json);
+            if (file == null) {
+                Logger.Error('Failed to load file: ' + path);
+                return false;
+            }
+            return JSON.parse(file);
         } catch (error) {
             Logger.Error('Error loading file as json: ' + error);
             return false;
@@ -95,9 +102,13 @@ const utils = {
      * @returns {string | boolean}
      */
     repathToSave(path) {
-        Logger.Info("Repathing path: " + path);
+        if (config["verbose"]) {
+            Logger.Info("Repathing path: " + path);
+        }
         if (config["overwriteVanilla"]) {
-            Logger.Info("Overwriting vanilla, skipping repathing.");
+            if (config["verbose"]) {
+                Logger.Info("Overwriting vanilla, skipping repathing.");
+            }
             return path;
         }
         try {
@@ -115,21 +126,24 @@ const utils = {
      */
     saveJsonAsGameFile(path, data, skipRepath = false) {
         let savePath = path;
+        let dataToSave = data;
         if (!skipRepath) {
+            Logger.Info('Repathing path: ' + path);
             savePath = utils.repathToSave(path);
             if (savePath == false) {
                 return false;
             }
+            Logger.Info('Repathed path: ' + savePath);
         } else {
             savePath = path;
         }
 
         let cr2wContent = null;
         try {
-            if (typeof data == "string") {
-                cr2wContent = wkit.JsonToCR2W(data);
+            if (typeof dataToSave == "string") {
+                cr2wContent = wkit.JsonToCR2W(dataToSave);
             } else {
-                cr2wContent = wkit.JsonToCR2W(JSON.stringify(data, null, 2));
+                cr2wContent = wkit.JsonToCR2W(JSON.stringify(dataToSave, null, 2));
             }
         } catch (err) {
             Logger.Error(`Couldn't parse active file content to cr2w:`);
@@ -162,6 +176,7 @@ const utils = {
         for (let i = 0; i < savedFilePaths.length; i++) {
             const filePath = savedFilePaths[i];
             const fileData = savedFileData[i];
+            Logger.Info('Saving file: ' + filePath);
             utils.saveJsonAsGameFile(filePath, fileData);
         }
         return true;
@@ -188,8 +203,22 @@ const processFiles = {
             return false;
         }
         entity = entity_new;
-    
-        // process the linked appearance file if it exists
+        try {
+            let appearancefiles = [];
+            const appearances = entity["Data"]["RootChunk"]["appearances"];
+            for (let index = 0; index < appearances.length; index++) {
+                const appearance = appearances[index];
+                appearancefiles.push(appearance["appearanceResource"]["DepotPath"]["$value"]);
+                appearances[index]["appearanceResource"]["DepotPath"]["$value"] = utils.repathToSave(appearance["appearanceResource"]["DepotPath"]["$value"]);
+            }
+            const uniqueAppearanceFiles = [...new Set(appearancefiles)];
+            for (const appearanceFile of uniqueAppearanceFiles) {
+                processFiles.appearance(appearanceFile);
+            }
+        } catch (error) {
+            Logger.Error('Error processing appearances: ' + error);
+            return false;
+        }
     
         // save the entity
         if (!utils.addFileToSaveBuffer(config["entityPath"], entity)) {
@@ -252,6 +281,77 @@ const processFiles = {
         }
         Logger.Success('Anims added to save buffer.');
         return true;
+    },
+    /**
+     * @returns {boolean}
+     */
+    effect(effectFilepath) {
+        Logger.Info('Processing effect: ' + effectFilepath);
+        if (!effectFilepath.endsWith(".effect")) {
+            Logger.Info('Effect is not an effect file, skipping.');
+            return true;
+        }
+        let effect = utils.loadFileAsJson(effectFilepath);
+        if (effect == false) {
+            Logger.Warning('Failed to load effect.');
+            return true;
+        }
+        
+        for (let effectEvent of effect["Data"]["RootChunk"]["events"]) {
+            
+            if (effectEvent["Data"]["$type"] == "effectTrackItemParticles") {
+                if (effectEvent["Data"]["size"]["evaluator"]["Data"]["value"] == undefined) {
+                    Logger.Warning('No size found for particle effect.');
+                    continue
+                }
+                try {
+                    effectEvent["Data"]["size"]["evaluator"]["Data"]["value"] *= config["scaleFactor"];
+                } catch (error) {
+                    Logger.Error('Error scaling particle size: ' + error);
+                    Logger.Error('Event structure: ' + JSON.stringify(effectEvent["Data"], null, 2));
+                    return false;
+                }
+            }
+        }
+
+        if (!utils.addFileToSaveBuffer(effectFilepath, effect)) {
+            Logger.Error('Failed to save effect to buffer.');
+            return false;
+        }
+        Logger.Success('Effect added to save buffer.');
+        return true;
+    },
+    /**
+     * @returns {boolean}
+     */
+    appearance(appearanceFilepath) {
+        Logger.Info('Processing appearance: ' + appearanceFilepath);
+        let appearance = utils.loadFileAsJson(appearanceFilepath);
+        if (appearance == false) {
+            Logger.Warning('Failed to load appearance.');
+            return true;
+        }
+
+        // Create a direct reference to the appearances array
+        const appearances = appearance["Data"]["RootChunk"]["appearances"];
+        
+        // Process each appearance in the array
+        for (let i = 0; i < appearances.length; i++) {
+            const currentAppearance = appearances[i];
+            const [success, newAppearance] = processGeneric.appearance(currentAppearance, false);
+            if (!success) {
+                Logger.Error('Failed to process appearance at index ' + i);
+                return false;
+            }
+            appearances[i] = newAppearance;
+        }
+
+        if (!utils.addFileToSaveBuffer(appearanceFilepath, appearance)) {
+            Logger.Error('Failed to save appearance to buffer.');
+            return false;
+        }
+        Logger.Success('Appearance added to save buffer.');
+        return true;
     }
 }
 
@@ -271,6 +371,10 @@ const processGeneric = {
             const repathedDependencies = [];
             for (const dependency of dependencies) {
                 if (dependency["DepotPath"]) {
+                    if (!(dependency["DepotPath"]["$value"].split("\\").pop().split(".").pop() in config["customPaths"])) {
+                        repathedDependencies.push(dependency);
+                        continue;
+                    }
                     const newPath = utils.repathToSave(dependency["DepotPath"]["$value"]);
                     if (newPath == false) {
                         Logger.Error('Failed to repath dependency: ' + dependency);
@@ -292,28 +396,46 @@ const processGeneric = {
     /**
      * @returns {boolean | json}
      */
-    appearance(appearance) {
+    appearance(appearance, isEntity = true) {
         Logger.Info('Processing appearance...');
         try {
     
             // first process the components
-            const components = appearance['Data']['RootChunk']['components'];
+            let components;
+            if (isEntity) {
+                components = appearance['Data']['RootChunk']['components'];
+            } else {
+                components = appearance['Data']['components'];
+            }
             const [comp_success, components_new] = processComponents.array(components, appearance);
             if (!comp_success) {
                 Logger.Error("Failed to process components.");
                 return [false, []];
             }
-            appearance['Data']['RootChunk']['components'] = components_new;
+            if (isEntity) {
+                appearance['Data']['RootChunk']['components'] = components_new;
+            } else {
+                appearance['Data']['components'] = components_new;
+            }
     
             // then repath the dependencies
             Logger.Info('Repathing dependencies...');
-            const [dep_success, dependencies_new] = processGeneric.repathDependencies(appearance['Data']['RootChunk']['resolvedDependencies'], config);
+            let dep_success, dependencies_new;
+            if (isEntity) {
+                [dep_success, dependencies_new] = processGeneric.repathDependencies(appearance['Data']['RootChunk']['resolvedDependencies']);
+            } else {
+                [dep_success, dependencies_new] = processGeneric.repathDependencies(appearance['Data']['resolvedDependencies']);
+            }
             if (!dep_success) {
                 Logger.Error("Failed to repath dependencies.");
                 return [false, []];
             }
             Logger.Success('Generated new dependencies successfully.');
-            appearance['Data']['RootChunk']['resolvedDependencies'] = dependencies_new;
+            if (isEntity) {
+                appearance['Data']['RootChunk']['resolvedDependencies'] = dependencies_new;
+            } else {
+                appearance['Data']['resolvedDependencies'] = dependencies_new;
+            }
             Logger.Success('Saved new dependencies successfully.');
             return [true, appearance];
         } catch (error) {
@@ -409,6 +531,9 @@ const processComponents = {
             component["visualScale"]["X"] *= config["scaleFactor"];
             component["visualScale"]["Y"] *= config["scaleFactor"];
             component["visualScale"]["Z"] *= config["scaleFactor"];
+            if (config["ChangeLODMode"]) {
+                component["LODMode"] = "AlwaysVisible";
+            }
             return [true, component];
         } catch (error) {
             Logger.Error('Error processing entMeshComponent: ' + error);
@@ -454,11 +579,39 @@ const processComponents = {
 
         return [true, component];
     },
-    entEffectSpawnerComponent(component) {
-        // get effect files
-        // rescale values
-        // also leads to a handle ref id
-        return [true, component];
+    entEffectSpawnerComponent(component, rawJson) {
+        Logger.Info('Processing entEffectSpawnerComponent...');
+        try {
+            const id = component["id"];
+            const [success, index, chunk] = processComponents.getChunkbyId(id, rawJson);
+            if (!success) {
+                Logger.Error('Failed to get chunk by id for entEffectSpawnerComponent');
+                return [false, component];
+            }
+            Logger.Info("Got Chunk: " + Object.keys(chunk));
+            for (const effect of chunk["effectDescs"]) {
+                Logger.Info("Effect: " + Object.keys(effect["Data"]));
+                processFiles.effect(effect["Data"]["effect"]["DepotPath"]["$value"]);
+                const newEffectFilepath = utils.repathToSave(effect["Data"]["effect"]["DepotPath"]["$value"]);
+                if (newEffectFilepath == false) {
+                    return [false, component];
+                }
+                effect["Data"]["effect"]["DepotPath"]["$value"] = newEffectFilepath;
+                for (const effectPos of effect["Data"]["compiledEffectInfo"]["relativePositions"]) {
+                    effectPos["X"] *= config["scaleFactor"];
+                    effectPos["Y"] *= config["scaleFactor"];
+                    effectPos["Z"] *= config["scaleFactor"];
+                }
+            }
+            Logger.Info("Saving new chunk...");
+            rawJson["Data"]["RootChunk"]["compiledData"]["Data"]["Chunks"][index] = chunk;
+            Logger.Success("Saved new chunk successfully.");
+
+            return [true, component];
+        } catch (error) {
+            Logger.Error('Error processing entEffectSpawnerComponent: ' + error);
+            return [false, component];
+        }
     },
     entLightChannelComponent(component, rawJson) {
         // need to go from `HandleRefId` to array of vertices
@@ -467,9 +620,6 @@ const processComponents = {
             Logger.Error('Failed to get chunk by id for entLightChannelComponent');
             return [false, component];
         }
-        Logger.Info("Chunk Keys: " + Object.keys(chunk));
-        Logger.Info("Shape Keys: " + Object.keys(chunk["shape"]));
-        Logger.Info("Shape Data Keys: " + Object.keys(chunk["shape"]["Data"]));
         try {
             const vertices = chunk["shape"]["Data"]["vertices"];
             for (const vertex of vertices) {
@@ -490,13 +640,18 @@ const processComponents = {
         return [true, component];
     },
     
-    // return bool, array of components
-    // takes an array of components and resizes them, returns true if successful
-    // is the entry point for processing components
+    /**
+     * @returns {boolean | array}
+     */
     array(components, rawJson) {
+        Logger.Info('Processing components...');
+        Logger.Info("Components: " + components.length);
+        let index = 0;
         const processedComponents = [];
         try {
             for (const component of components) {
+                Logger.Info("Component " + index + ": " + component['$type']);
+                index++;
                 // try to adjust the local Transform on component level
                 try {
                     const [success, newTransform] = processComponents.localTransform(component['localTransform'], config["scaleFactor"]);
@@ -545,7 +700,9 @@ const processComponents = {
     }
 }
 
-// return void
+/**
+ * @returns {void}
+ */
 function main() {
     Logger.Info('Starting resize entity script...');
     // get config or create and exit early if no config existed at the start
